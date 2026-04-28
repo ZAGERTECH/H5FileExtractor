@@ -111,8 +111,8 @@ class H5DataMatrixExtractor(QMainWindow):
         # 递归遍历第一帧内的所有节点
         self._add_tree_nodes(self.tree, first_frame_node, "")
 
-        # 默认展开第一层
-        self.tree.expandToDepth(0)
+        # 强制全部折叠
+        self.tree.collapseAll()
 
     def _add_tree_nodes(self, parent_ui_node, h5_node, current_path):
         for name, node in h5_node.items():
