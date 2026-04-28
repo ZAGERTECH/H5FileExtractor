@@ -147,6 +147,36 @@ class H5DataMatrixExtractor(QMainWindow):
                 # 把 h5 的真实路径存入隐藏数据中，供导出时使用
                 ui_node.setData(0, Qt.UserRole, rel_path)
 
+    def _handle_image_data(self, ds, fid, col_name, image_save_dir, has_images):
+        """Case A：处理图像数据，提取矩阵并保存为 PNG 图片"""
+        img_array = ds[:]
+        if img_array.size > 0:
+            if not has_images:
+                os.makedirs(image_save_dir, exist_ok=True)
+                has_images = True
+
+            img_filename = os.path.join(image_save_dir, f"{fid}_{col_name}.png")
+            cv2.imwrite(img_filename, img_array)
+
+        return has_images
+
+    def _handle_matrix_data(self, ds, fid, col_name, matrix_data_dict):
+        """Case B：处理 2D 矩阵数据，记录到字典中等待批量导出"""
+        mat_array = ds[:]
+        if col_name not in matrix_data_dict:
+            matrix_data_dict[col_name] = []
+        matrix_data_dict[col_name].append((fid, mat_array))
+
+    def _handle_scalar_data(self, ds, col_name, row_dict_1d, shape_len):
+        """Case C：处理常规 1D 标量或字符串，直接填入当前行字典"""
+        val = ds[0] if shape_len > 0 else ds[()]
+        if isinstance(val, bytes):
+            val = val.decode('utf-8', 'ignore')
+        elif isinstance(val, np.ndarray):
+            val = str(val.tolist())
+
+        row_dict_1d[col_name] = val
+
     def export_data(self, is_excel=False):
         # 扫描树，收集用户勾选了哪些具体的底层字段
         selected_h5_paths = []
@@ -178,9 +208,9 @@ class H5DataMatrixExtractor(QMainWindow):
         frame_keys = sorted(self.frames_group.keys())
         total_frames = len(frame_keys)
 
-        all_rows_1d = []  # 用于存常规标量数据
-        matrix_data_dict = {}  # 用于存矩阵数据 {col_name: [(frame_id, matrix_array), ...]}
-        has_images = False  # 标记是否导出了图片
+        all_rows_1d = []
+        matrix_data_dict = {}
+        has_images = False
 
         progress = QProgressDialog("正在提取分类数据...", "取消", 0, total_frames, self)
         progress.setWindowModality(Qt.WindowModal)
@@ -191,7 +221,7 @@ class H5DataMatrixExtractor(QMainWindow):
                     break
 
                 frame_node = self.frames_group[fid]
-                row_dict_1d = {'Frame_ID': fid}  # 1D 主表第一列固定为帧号
+                row_dict_1d = {'Frame_ID': fid}
 
                 # 去当前帧里捞取用户勾选的数据
                 for path in selected_h5_paths:
@@ -201,44 +231,18 @@ class H5DataMatrixExtractor(QMainWindow):
                         ds = frame_node[path]
                         shape_len = len(ds.shape)
 
-                        # ======= case A：处理图像数据 (保存为 PNG) =======
+                        # 使用提取出的函数进行路由处理
                         if 'image' in col_name.lower() or shape_len >= 3:
-                            img_array = ds[:]
-                            if img_array.size > 0:
-                                if not has_images:
-                                    os.makedirs(image_save_dir, exist_ok=True)
-                                    has_images = True
-
-                                # HDF5存的图若为RGB，cv2保存需要转为BGR。这里假设底层存的是标准的图像矩阵
-                                img_filename = os.path.join(image_save_dir, f"{fid}_{col_name}.png")
-                                # 如果图像色彩不对，可以改成 cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-                                cv2.imwrite(img_filename, img_array)
-                            continue
-
-                        # ======= case B：处理 2D 矩阵 (如 frame_info_L) =======
+                            has_images = self._handle_image_data(ds, fid, col_name, image_save_dir, has_images)
                         elif shape_len == 2:
-                            mat_array = ds[:]
-                            if col_name not in matrix_data_dict:
-                                matrix_data_dict[col_name] = []
-                            matrix_data_dict[col_name].append((fid, mat_array))
-                            continue
-
-                        # ======= case C：处理常规 1D 标量 / 字符串 =======
+                            self._handle_matrix_data(ds, fid, col_name, matrix_data_dict)
                         else:
-                            val = ds[0] if shape_len > 0 else ds[()]
-                            if isinstance(val, bytes):
-                                val = val.decode('utf-8', 'ignore')
-                            # 如果是一个小数组，强转为字符串存入单元格
-                            elif isinstance(val, np.ndarray):
-                                val = str(val.tolist())
-
-                            row_dict_1d[col_name] = val
+                            self._handle_scalar_data(ds, col_name, row_dict_1d, shape_len)
 
                     except Exception:
-                        # 万一某一帧缺了这个数据
                         row_dict_1d[col_name] = None
 
-                        # 如果这一帧除了 Frame_ID 还有其他 1D 数据，才加入主表
+                # 如果这一帧除了 Frame_ID 还有其他 1D 数据，才加入主表
                 if len(row_dict_1d) > 1:
                     all_rows_1d.append(row_dict_1d)
 
@@ -263,8 +267,6 @@ class H5DataMatrixExtractor(QMainWindow):
                 giant_list = []
 
                 for fid, mat in mat_list:
-                    # 写入标识当前帧的表头 (占据第一列)
-                    # 为了防止列数报错，用 None 填充补齐后面的列
                     padding_cols = [None] * (mat.shape[1] - 1 if mat.shape[1] > 1 else 0)
                     giant_list.append([f"Frame_ID: {fid}"] + padding_cols)
 
@@ -274,10 +276,8 @@ class H5DataMatrixExtractor(QMainWindow):
                     else:
                         giant_list.append(["[Empty Matrix]"] + padding_cols)
 
-                    # 每个矩阵之间空一行
                     giant_list.append([None] * (mat.shape[1] if mat.shape[1] > 0 else 1))
 
-                # 将巨型列表转换为 DataFrame 一次性保存，兼容 CSV/Excel
                 df_mat = pd.DataFrame(giant_list)
                 if is_excel:
                     df_mat.to_excel(mat_save_path, index=False, header=False)
@@ -294,6 +294,7 @@ class H5DataMatrixExtractor(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出过程中发生错误:\n{str(e)}")
+
 
     def closeEvent(self, event):
         if self.h5_file:
