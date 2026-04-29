@@ -148,15 +148,32 @@ class H5DataMatrixExtractor(QMainWindow):
                 ui_node.setData(0, Qt.UserRole, rel_path)
 
     def _handle_image_data(self, ds, fid, col_name, image_save_dir, has_images):
-        """Case A：处理图像数据，提取矩阵并保存为 PNG 图片"""
+        """Case A：处理图像数据，拦截假图，并根据 L/R 分文件夹保存为 PNG"""
         img_array = ds[:]
-        if img_array.size > 0:
-            if not has_images:
-                os.makedirs(image_save_dir, exist_ok=True)
-                has_images = True
 
-            img_filename = os.path.join(image_save_dir, f"{fid}_{col_name}.png")
-            cv2.imwrite(img_filename, img_array)
+        # 拦截 1x1 或更小的假图片/占位图
+        if img_array.size == 0 or (img_array.shape[0] <= 1 and img_array.shape[1] <= 1):
+            return has_images
+
+        # 判断属于左相机还是右相机
+        sub_folder = "Other"  # 默认保底文件夹
+        if col_name.endswith("_L") or "_L_" in col_name:
+            sub_folder = "L"
+        elif col_name.endswith("_R") or "_R_" in col_name:
+            sub_folder = "R"
+
+        # 拼接出最终的目标目录，例如: xxx_images/L
+        target_dir = os.path.join(image_save_dir, sub_folder)
+
+        # 创建目录并保存
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir, exist_ok=True)
+
+        img_filename = os.path.join(target_dir, f"{fid}_{col_name}.png")
+        # 假设底层是RGB存的，OpenCV默认写BGR，如果颜色不对这里可以加个 cv2.cvtColor
+        cv2.imwrite(img_filename, img_array)
+
+        return True  # 只要保存了真实图片，就返回 True 标记
 
         return has_images
 
@@ -178,7 +195,6 @@ class H5DataMatrixExtractor(QMainWindow):
         row_dict_1d[col_name] = val
 
     def export_data(self, is_excel=False):
-        # 扫描树，收集用户勾选了哪些具体的底层字段
         selected_h5_paths = []
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():
@@ -188,31 +204,41 @@ class H5DataMatrixExtractor(QMainWindow):
             iterator += 1
 
         if not selected_h5_paths:
-            QMessageBox.warning(self, "未选择", "请至少勾选一个数据字段！")
+            QMessageBox.warning(self, "未选择", "请至少勾选一个数据字段。")
             return
 
-        # 让用户选择保存路径
         ext = "xlsx" if is_excel else "csv"
         file_filter = "Excel Files (*.xlsx)" if is_excel else "CSV Files (*.csv)"
-        save_path, _ = QFileDialog.getSaveFileName(self, f"保存为主表 ({ext.upper()})", "", file_filter)
+        # 用户选择保存的基础路径和文件名
+        user_choice_path, _ = QFileDialog.getSaveFileName(self, "选择保存位置及名称", "", file_filter)
 
-        if not save_path:
+        if not user_choice_path:
             return
 
-        # 获取保存目录和基础文件名，用于分离图像和矩阵文件
-        save_dir = os.path.dirname(save_path)
-        base_name = os.path.splitext(os.path.basename(save_path))[0]
-        image_save_dir = os.path.join(save_dir, f"{base_name}_images")
+        # 路径解析
+        base_dir = os.path.dirname(user_choice_path)
+        chosen_prefix = os.path.splitext(os.path.basename(user_choice_path))[0]
+        h5_filename_no_ext = os.path.splitext(os.path.basename(self.h5_file.filename))[0]
+
+        # 建立一级根目录: [H5文件名]_h5
+        root_export_dir = os.path.join(base_dir, f"{h5_filename_no_ext}_h5")
+
+        # 建立二级子目录
+        common_data_dir = os.path.join(root_export_dir, f"{chosen_prefix}_common_data")
+        frame_info_dir = os.path.join(root_export_dir, f"{chosen_prefix}_frame_info")
+        image_save_dir = os.path.join(root_export_dir, f"{chosen_prefix}_images")
+
+        # 确保目录存在
+        os.makedirs(common_data_dir, exist_ok=True)
 
         # 准备容器
         frame_keys = sorted(self.frames_group.keys())
         total_frames = len(frame_keys)
-
         all_rows_1d = []
         matrix_data_dict = {}
         has_images = False
 
-        progress = QProgressDialog("正在提取分类数据...", "取消", 0, total_frames, self)
+        progress = QProgressDialog("正在提取数据...", "取消", 0, total_frames, self)
         progress.setWindowModality(Qt.WindowModal)
 
         try:
@@ -223,77 +249,79 @@ class H5DataMatrixExtractor(QMainWindow):
                 frame_node = self.frames_group[fid]
                 row_dict_1d = {'Frame_ID': fid}
 
-                # 去当前帧里捞取用户勾选的数据
                 for path in selected_h5_paths:
                     col_name = path.replace('/', '_')
-
                     try:
                         ds = frame_node[path]
                         shape_len = len(ds.shape)
 
-                        # 使用提取出的函数进行路由处理
                         if 'image' in col_name.lower() or shape_len >= 3:
+                            # 传递新的图像根目录
                             has_images = self._handle_image_data(ds, fid, col_name, image_save_dir, has_images)
                         elif shape_len == 2:
-                            self._handle_matrix_data(ds, fid, col_name, matrix_data_dict)
+                            self._handle_matrix_data(ds, fid, path, matrix_data_dict)
                         else:
                             self._handle_scalar_data(ds, col_name, row_dict_1d, shape_len)
-
                     except Exception:
                         row_dict_1d[col_name] = None
 
-                # 如果这一帧除了 Frame_ID 还有其他 1D 数据，才加入主表
                 if len(row_dict_1d) > 1:
                     all_rows_1d.append(row_dict_1d)
-
                 progress.setValue(i + 1)
 
-            # 开始写出各类文件
-            progress.setLabelText("正在写入文件，请稍候...")
             export_summary = []
 
-            # --- 写出常规 1D 主表 ---
+            # 写入 1D 主表到 common_data 文件夹
             if all_rows_1d:
+                main_csv_path = os.path.join(common_data_dir, f"{chosen_prefix}.{ext}")
                 df_1d = pd.DataFrame(all_rows_1d)
                 if is_excel:
-                    df_1d.to_excel(save_path, index=False)
+                    df_1d.to_excel(main_csv_path, index=False)
                 else:
-                    df_1d.to_csv(save_path, index=False)
-                export_summary.append("1D 主表导出成功")
+                    df_1d.to_csv(main_csv_path, index=False)
+                export_summary.append(f"主表: {chosen_prefix}.{ext}")
 
-            # --- 写出矩阵副表 (每个矩阵字段独立一个文件，帧之间空一行) ---
-            for col_name, mat_list in matrix_data_dict.items():
-                mat_save_path = os.path.join(save_dir, f"{base_name}_{col_name}.{ext}")
-                giant_list = []
+            # 写入矩阵数据到 frame_info 文件夹
+            if matrix_data_dict:
+                os.makedirs(frame_info_dir, exist_ok=True)
+                for h5_path, mat_list in matrix_data_dict.items():
+                    dataset_name = h5_path.split('/')[-1]
+                    mat_save_path = os.path.join(frame_info_dir, f"{dataset_name}.{ext}")
 
-                for fid, mat in mat_list:
-                    padding_cols = [None] * (mat.shape[1] - 1 if mat.shape[1] > 1 else 0)
-                    giant_list.append([f"Frame_ID: {fid}"] + padding_cols)
+                    giant_list = []
+                    max_cols = 0
+                    for fid, mat in mat_list:
+                        if mat.size > 0:
+                            max_cols = max(max_cols, mat.shape[1] if len(mat.shape) > 1 else mat.shape[0])
 
-                    if mat.size > 0:
-                        for row in mat:
-                            giant_list.append(row.tolist())
-                    else:
-                        giant_list.append(["[Empty Matrix]"] + padding_cols)
+                    header = ["Frame_ID"] + [str(idx) for idx in range(max_cols)]
+                    for fid, mat in mat_list:
+                        if mat.size > 0:
+                            if len(mat.shape) == 1:
+                                mat = mat.reshape(1, -1)
+                            for row in mat:
+                                row_list = row.tolist()
+                                padded_row = row_list + [None] * (max_cols - len(row_list))
+                                giant_list.append([fid] + padded_row)
 
-                    giant_list.append([None] * (mat.shape[1] if mat.shape[1] > 0 else 1))
-
-                df_mat = pd.DataFrame(giant_list)
-                if is_excel:
-                    df_mat.to_excel(mat_save_path, index=False, header=False)
-                else:
-                    df_mat.to_csv(mat_save_path, index=False, header=False)
-                export_summary.append(f"矩阵表 [{col_name}] 导出成功")
+                    if giant_list:
+                        df_mat = pd.DataFrame(giant_list, columns=header)
+                        if is_excel:
+                            df_mat.to_excel(mat_save_path, index=False)
+                        else:
+                            df_mat.to_csv(mat_save_path, index=False)
+                        export_summary.append(f"矩阵: {dataset_name}.{ext}")
 
             if has_images:
-                export_summary.append(f"图像序列已保存至文件夹: {base_name}_images")
+                export_summary.append("图像序列已分类导出")
 
             progress.setValue(total_frames)
             summary_text = "\n".join(export_summary)
-            QMessageBox.information(self, "导出完成", f"跨帧数据提取完毕！\n\n【导出明细】:\n{summary_text}")
+            QMessageBox.information(self, "导出完成",
+                                    f"已在以下位置生成数据结构：\n{root_export_dir}\n\n详情：\n{summary_text}")
 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出过程中发生错误:\n{str(e)}")
+            QMessageBox.critical(self, "错误", f"导出失败:\n{str(e)}")
 
 
     def closeEvent(self, event):
