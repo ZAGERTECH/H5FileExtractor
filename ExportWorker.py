@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import shutil
+from datetime import datetime
 
 from PyQt5.QtCore import  QThread, pyqtSignal
 import concurrent.futures
@@ -78,6 +79,8 @@ class ExportWorker(QThread):
     finished_successfully = pyqtSignal(int, str)
     error_occurred = pyqtSignal(str)
     export_cancelled = pyqtSignal()
+    status_updated = pyqtSignal(str)
+    disable_cancel_btn = pyqtSignal()
 
     def __init__(self, valid_files, selected_h5_paths, output_base_dir, chosen_prefix, ext, is_excel, max_workers):
         super().__init__()
@@ -98,22 +101,36 @@ class ExportWorker(QThread):
         current_frame_count = 0
         success_files_count = 0
 
+        # 定义日志写入函数，将日志保存在导出的目标文件夹下
+        log_path = os.path.join(self.output_base_dir, "export_log.txt")
+
+        def write_log(msg):
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+
+        write_log("=== 批量数据提取任务开始 ===")
+        write_log(f"输出根目录: {self.output_base_dir}")
+        write_log(f"分配进程数: {self.max_workers}")
+
         try:
             for fp, frame_keys in self.valid_files:
                 if self.is_cancelled:
+                    write_log("WARNING: 任务已被用户手动取消")
                     break
 
                 h5_filename_no_ext = os.path.splitext(os.path.basename(fp))[0]
                 root_export_dir = os.path.join(self.output_base_dir, f"{h5_filename_no_ext}_h5")
 
+                write_log(f"开始解析: {os.path.basename(fp)} (包含 {len(frame_keys)} 帧)")
+
                 if os.path.exists(root_export_dir):
+                    write_log(f"  -> 检测到同名旧文件夹，正在执行清理...")
                     shutil.rmtree(root_export_dir)
 
                 common_data_dir = os.path.join(root_export_dir, f"{self.chosen_prefix}_common_data")
                 frame_info_dir = os.path.join(root_export_dir, f"{self.chosen_prefix}_frame_info")
                 image_save_dir = os.path.join(root_export_dir, f"{self.chosen_prefix}_images")
 
-                # 重新创建基础目录
                 os.makedirs(common_data_dir, exist_ok=True)
 
                 all_rows_1d = []
@@ -123,7 +140,6 @@ class ExportWorker(QThread):
                 chunks = [frame_keys[i:i + chunk_size] for i in range(0, len(frame_keys), chunk_size)]
 
                 with concurrent.futures.ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-                    # 将共享的 cancel_event 传递给所有子进程
                     futures = {
                         executor.submit(process_frames_chunk, fp, chunk, self.selected_h5_paths, image_save_dir,
                                         self.cancel_event): chunk
@@ -147,10 +163,18 @@ class ExportWorker(QThread):
                                 matrix_data_dict[path].extend(mat_list)
 
                         except Exception as e:
-                            print(f"解析块出现错误: {e}")
+                            err_msg = f"解析块出现错误: {e}"
+                            print(err_msg)
+                            write_log(f"  -> ERROR: {err_msg}")
 
                         current_frame_count += len(chunk_fids)
                         self.progress_updated.emit(current_frame_count)
+
+                write_log(f"  -> 数据提取完毕，正在生成结构化文件...")
+
+                # 发送状态信号，告诉 UI 现在进入了写文件阶段
+                self.status_updated.emit(f"正在保存 {h5_filename_no_ext} 的导出文件，请稍候...")
+                self.disable_cancel_btn.emit()
 
                 all_rows_1d.sort(key=lambda x: x['Frame_ID'])
                 for path in matrix_data_dict:
@@ -192,12 +216,15 @@ class ExportWorker(QThread):
                             else:
                                 df_mat.to_csv(mat_save_path, index=False)
 
+                write_log(f"文件处理成功: {os.path.basename(fp)}\n")
                 success_files_count += 1
 
             if not self.is_cancelled:
+                write_log(f"=== 任务圆满结束，共成功导出 {success_files_count} 个文件 ===")
                 self.finished_successfully.emit(success_files_count, self.output_base_dir)
 
         except Exception as e:
+            write_log(f"FATAL ERROR - 导出崩溃: {str(e)}")
             self.error_occurred.emit(str(e))
 
     def cancel(self):

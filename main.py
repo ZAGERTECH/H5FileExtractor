@@ -219,6 +219,10 @@ class H5DataMatrixExtractor(QMainWindow):
         self.progress.setWindowModality(Qt.WindowModal)
         self.progress.setValue(0)
 
+        # 禁用自动重置和自动关闭，确保它能撑到弹窗出现
+        self.progress.setAutoReset(False)
+        self.progress.setAutoClose(False)
+
         max_workers = self.spin_thread.value()
 
         self.worker = ExportWorker(
@@ -232,6 +236,10 @@ class H5DataMatrixExtractor(QMainWindow):
         )
 
         self.worker.progress_updated.connect(self.progress.setValue)
+        # 绑定状态信号到进度条的标签文字上
+        # 收到禁用信号后，直接把取消按钮设为 None (即隐藏)
+        self.worker.disable_cancel_btn.connect(lambda: self.progress.setCancelButton(None))
+        self.worker.status_updated.connect(self.progress.setLabelText)
         self.worker.finished_successfully.connect(self.on_export_success)
         self.worker.error_occurred.connect(self.on_export_error)
         self.worker.export_cancelled.connect(self.on_export_cancel)
