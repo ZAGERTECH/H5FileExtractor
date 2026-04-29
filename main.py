@@ -27,7 +27,7 @@ class H5DataMatrixExtractor(QMainWindow):
         main_layout = QVBoxLayout(central_widget)
 
         top_layout = QHBoxLayout()
-        self.btn_open = QPushButton("打开多份 H5 文件 (批量)")
+        self.btn_open = QPushButton("加载 H5 文件")
         self.btn_open.clicked.connect(self.open_files)
         self.label_file_path = QLabel("当前未加载文件")
         self.label_file_path.setStyleSheet("color: gray;")

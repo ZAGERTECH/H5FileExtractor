@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import shutil
 
 from PyQt5.QtCore import  QThread, pyqtSignal
 import concurrent.futures
@@ -104,10 +105,15 @@ class ExportWorker(QThread):
 
                 h5_filename_no_ext = os.path.splitext(os.path.basename(fp))[0]
                 root_export_dir = os.path.join(self.output_base_dir, f"{h5_filename_no_ext}_h5")
+
+                if os.path.exists(root_export_dir):
+                    shutil.rmtree(root_export_dir)
+
                 common_data_dir = os.path.join(root_export_dir, f"{self.chosen_prefix}_common_data")
                 frame_info_dir = os.path.join(root_export_dir, f"{self.chosen_prefix}_frame_info")
                 image_save_dir = os.path.join(root_export_dir, f"{self.chosen_prefix}_images")
 
+                # 重新创建基础目录
                 os.makedirs(common_data_dir, exist_ok=True)
 
                 all_rows_1d = []
