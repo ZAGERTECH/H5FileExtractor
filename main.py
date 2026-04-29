@@ -2,12 +2,14 @@ import os
 import sys
 import multiprocessing
 import h5py
+import ctypes
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QMessageBox,
                              QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView,
                              QTreeWidgetItemIterator, QProgressDialog, QInputDialog,
                              QSpinBox)
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPalette, QIcon
 
 from ExportWorker import ExportWorker
 
@@ -257,10 +259,26 @@ class H5DataMatrixExtractor(QMainWindow):
 
 
 if __name__ == "__main__":
-    # 注：多进程在 Windows 下必须加这一句，防止子进程无限递归派生
     multiprocessing.freeze_support()
+
+    # 告诉 Windows 这是一个独立的应用程序，切断与 python.exe 的图标默认绑定
+    try:
+        myappid = 'zagertech.h5extractor.1.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    palette = app.palette()
+    active_highlight_color = palette.color(QPalette.Active, QPalette.Highlight)
+    palette.setColor(QPalette.Inactive, QPalette.Highlight, active_highlight_color)
+    app.setPalette(palette)
+
+    # 设置全局应用程序图标（这会自动应用到主窗口以及所有弹出的子窗口/对话框）
+    app.setWindowIcon(QIcon("resource/logo.png"))
+
     window = H5DataMatrixExtractor()
     window.show()
     sys.exit(app.exec_())
