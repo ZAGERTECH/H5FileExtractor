@@ -1,26 +1,24 @@
 import os
 import sys
-
-import cv2
+import multiprocessing
 import h5py
-import numpy as np
-import pandas as pd
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QFileDialog, QMessageBox,
                              QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView,
-                             QTreeWidgetItemIterator, QProgressDialog)
+                             QTreeWidgetItemIterator, QProgressDialog, QInputDialog,
+                             QSpinBox)
 from PyQt5.QtCore import Qt
+
+from ExportWorker import ExportWorker
 
 
 class H5DataMatrixExtractor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(" 帧序列数据提取器 (按列提取)")
+        self.setWindowTitle("H5FileExtractor")
         self.resize(900, 700)
 
-        self.h5_file = None
-        self.frames_group = None
-
+        self.h5_file_paths = []
         self.init_ui()
 
     def init_ui(self):
@@ -28,20 +26,22 @@ class H5DataMatrixExtractor(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
 
-        # --- 顶部工具栏 ---
         top_layout = QHBoxLayout()
-        self.btn_open = QPushButton("打开 H5 文件")
-        self.btn_open.clicked.connect(self.open_file)
-        self.label_file_path = QLabel("当前未打开文件")
+        self.btn_open = QPushButton("打开多份 H5 文件 (批量)")
+        self.btn_open.clicked.connect(self.open_files)
+        self.label_file_path = QLabel("当前未加载文件")
         self.label_file_path.setStyleSheet("color: gray;")
+
+        self.btn_about = QPushButton("关于")
+        self.btn_about.clicked.connect(self.show_about_dialog)
 
         top_layout.addWidget(self.btn_open)
         top_layout.addWidget(self.label_file_path)
         top_layout.addStretch()
+        top_layout.addWidget(self.btn_about)
         main_layout.addLayout(top_layout)
 
-        # --- 主体：数据字段选择树 ---
-        self.label_info = QLabel("请在下方勾选你需要导出的数据字段 (基于第一帧自动识别)：")
+        self.label_info = QLabel("请在下方勾选需要导出的数据字段 (基于首个文件自动识别)：")
         main_layout.addWidget(self.label_info)
 
         self.tree = QTreeWidget()
@@ -50,92 +50,115 @@ class H5DataMatrixExtractor(QMainWindow):
         self.tree.header().setSectionResizeMode(1, QHeaderView.Stretch)
         main_layout.addWidget(self.tree)
 
-        # --- 底部：导出按钮 ---
+        thread_layout = QHBoxLayout()
+        self.label_thread = QLabel("解析线程数:")
+        self.spin_thread = QSpinBox()
+        self.spin_thread.setMinimum(1)
+        max_cores = os.cpu_count() or 1
+        self.spin_thread.setMaximum(max_cores)
+        self.spin_thread.setValue(max_cores)
+
+        thread_layout.addWidget(self.label_thread)
+        thread_layout.addWidget(self.spin_thread)
+        thread_layout.addStretch()
+        main_layout.addLayout(thread_layout)
+
         bottom_layout = QHBoxLayout()
-        self.btn_export_csv = QPushButton("导出选中的列 (CSV)")
-        self.btn_export_excel = QPushButton("导出选中的列 (Excel)")
+        self.btn_export_csv = QPushButton("批量导出选中的元素 (CSV)")
+        self.btn_export_excel = QPushButton("批量导出选中的元素 (Excel)")
         self.btn_export_csv.setEnabled(False)
         self.btn_export_excel.setEnabled(False)
 
-        self.btn_export_csv.clicked.connect(lambda: self.export_data(is_excel=False))
-        self.btn_export_excel.clicked.connect(lambda: self.export_data(is_excel=True))
+        self.btn_export_csv.clicked.connect(lambda: self.export_batch_data(is_excel=False))
+        self.btn_export_excel.clicked.connect(lambda: self.export_batch_data(is_excel=True))
 
         bottom_layout.addStretch()
         bottom_layout.addWidget(self.btn_export_csv)
         bottom_layout.addWidget(self.btn_export_excel)
         main_layout.addLayout(bottom_layout)
 
-    def open_file(self):
+    def show_about_dialog(self):
+        about_text = (
+            "<h2 align='center'>H5FileExtractor</h2>"
+            "<table>"
+            "<tr>"
+            "<td><b>作者：</b></td>"
+            "<td>sbhinx</td>"
+            "</tr>"
+            "<tr>"
+            "<td><b>描述：</b></td>"
+            "<td>用于批量解析 HDF5 格式的路测数据</td>"
+            "</tr>"
+            "<tr>"
+            "<td><b>Github：</b></td>"
+            "<td><a href='https://github.com/ZAGERTECH/H5FileExtractor'>https://github.com/ZAGERTECH/H5FileExtractor</a></td>"
+            "</tr>"
+        )
+        QMessageBox.about(self, "关于", about_text)
+
+    def open_files(self):
         options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择 H5 文件", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
-                                                   options=options)
+        file_paths, _ = QFileDialog.getOpenFileNames(self, "选择 H5 文件(支持多个)", "",
+                                                     "HDF5 Files (*.h5 *.hdf5);;All Files (*)", options=options)
 
-        if file_path:
+        if file_paths:
+            self.h5_file_paths = file_paths
+            first_file = file_paths[0]
+
             try:
-                if self.h5_file:
-                    self.h5_file.close()
+                with h5py.File(first_file, 'r') as f:
+                    if 'frames' not in f or not isinstance(f['frames'], h5py.Group):
+                        QMessageBox.warning(self, "结构校验失败", "首个 H5 文件不包含 'frames' 根组！")
+                        self.h5_file_paths = []
+                        return
 
-                self.h5_file = h5py.File(file_path, 'r')
+                    frames_group = f['frames']
+                    frame_keys = sorted(frames_group.keys())
 
-                #  严格校验: 必须包含 frames 文件夹
-                if 'frames' not in self.h5_file or not isinstance(self.h5_file['frames'], h5py.Group):
-                    QMessageBox.warning(self, "结构校验失败", "该 H5 文件不包含 'frames' 根组，或者结构不符合预期！")
-                    self.h5_file.close()
-                    self.h5_file = None
-                    return
+                    if not frame_keys:
+                        QMessageBox.warning(self, "无数据", "首个文件的 'frames' 文件夹为空！")
+                        return
 
-                self.frames_group = self.h5_file['frames']
-                frame_keys = sorted(self.frames_group.keys())
+                    self.label_file_path.setText(
+                        f"已加载 {len(file_paths)} 个文件 (树结构参照: {os.path.basename(first_file)})")
+                    self.label_file_path.setStyleSheet("color: green;")
 
-                if not frame_keys:
-                    QMessageBox.warning(self, "无数据", "'frames' 文件夹为空！")
-                    return
-
-                self.label_file_path.setText(f"当前文件: {file_path} (共 {len(frame_keys)} 帧)")
-                self.label_file_path.setStyleSheet("color: green;")
-
-                #  读取第一帧，构建勾选树
-                first_frame_id = frame_keys[0]
-                self.build_schema_tree(first_frame_id)
+                    first_frame_id = frame_keys[0]
+                    self.build_schema_tree(frames_group[first_frame_id])
 
                 self.btn_export_csv.setEnabled(True)
                 self.btn_export_excel.setEnabled(True)
 
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"读取失败:\n{str(e)}")
+                QMessageBox.critical(self, "错误", f"首个文件读取失败:\n{str(e)}")
 
-    def build_schema_tree(self, frame_id):
+    def build_schema_tree(self, first_frame_node):
         self.tree.clear()
-        first_frame_node = self.frames_group[frame_id]
 
-        # 递归遍历第一帧内的所有节点
-        self._add_tree_nodes(self.tree, first_frame_node, "")
+        # 新增母树节点，开启用户复选和自动级联（Tristate）状态
+        root_node = QTreeWidgetItem(self.tree, ["全选 / 取消全选", "", ""])
+        root_node.setFlags(root_node.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+        root_node.setCheckState(0, Qt.Unchecked)
 
-        # 强制全部折叠
-        self.tree.collapseAll()
+        # 将第一帧的节点内容全部挂载到母节点下，而不是直接挂在 self.tree 下
+        self._add_tree_nodes(root_node, first_frame_node, "")
+
+        # 默认展开母节点，折叠内部子节点保持清爽
+        root_node.setExpanded(True)
 
     def _add_tree_nodes(self, parent_ui_node, h5_node, current_path):
         for name, node in h5_node.items():
-            # 记录它在 h5 中的相对路径，例如: can_info/Vehicle_Speed
             rel_path = f"{current_path}/{name}" if current_path else name
 
             if isinstance(node, h5py.Group):
-                # 这是一个文件夹 (如 can_info)
                 ui_node = QTreeWidgetItem(parent_ui_node, [name, "[组/目录]", ""])
-                # 允许其拥有复选框，并且带有自动级联选中（点击父节点，子节点全选）
                 ui_node.setFlags(ui_node.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
                 ui_node.setCheckState(0, Qt.Unchecked)
-                # 递归里面的内容
+                ui_node.setExpanded(False)
                 self._add_tree_nodes(ui_node, node, rel_path)
 
             elif isinstance(node, h5py.Dataset):
-                # 这是一个具体的数据字段 (如 Vehicle_Speed)
-                # 过滤掉高维数组(如图像), 只留标量或1D短数组用于CSV列导出
-                # if len(node.shape) >= 2 or (len(node.shape) == 1 and node.shape[0] > 10):
-                #     continue
-
                 try:
-                    # 抓取一个预览值
                     val = node[0] if len(node.shape) > 0 else node[()]
                     val_str = val.decode('utf-8', 'ignore') if isinstance(val, bytes) else str(val)
                 except:
@@ -144,57 +167,9 @@ class H5DataMatrixExtractor(QMainWindow):
                 ui_node = QTreeWidgetItem(parent_ui_node, [name, val_str, str(node.dtype)])
                 ui_node.setFlags(ui_node.flags() | Qt.ItemIsUserCheckable)
                 ui_node.setCheckState(0, Qt.Unchecked)
-                # 把 h5 的真实路径存入隐藏数据中，供导出时使用
                 ui_node.setData(0, Qt.UserRole, rel_path)
 
-    def _handle_image_data(self, ds, fid, col_name, image_save_dir, has_images):
-        """Case A：处理图像数据，拦截假图，并根据 L/R 分文件夹保存为 PNG"""
-        img_array = ds[:]
-
-        # 拦截 1x1 或更小的假图片/占位图
-        if img_array.size == 0 or (img_array.shape[0] <= 1 and img_array.shape[1] <= 1):
-            return has_images
-
-        # 判断属于左相机还是右相机
-        sub_folder = "Other"  # 默认保底文件夹
-        if col_name.endswith("_L") or "_L_" in col_name:
-            sub_folder = "L"
-        elif col_name.endswith("_R") or "_R_" in col_name:
-            sub_folder = "R"
-
-        # 拼接出最终的目标目录，例如: xxx_images/L
-        target_dir = os.path.join(image_save_dir, sub_folder)
-
-        # 创建目录并保存
-        if not os.path.exists(target_dir):
-            os.makedirs(target_dir, exist_ok=True)
-
-        img_filename = os.path.join(target_dir, f"{fid}_{col_name}.png")
-        # 假设底层是RGB存的，OpenCV默认写BGR，如果颜色不对这里可以加个 cv2.cvtColor
-        cv2.imwrite(img_filename, img_array)
-
-        return True  # 只要保存了真实图片，就返回 True 标记
-
-        return has_images
-
-    def _handle_matrix_data(self, ds, fid, col_name, matrix_data_dict):
-        """Case B：处理 2D 矩阵数据，记录到字典中等待批量导出"""
-        mat_array = ds[:]
-        if col_name not in matrix_data_dict:
-            matrix_data_dict[col_name] = []
-        matrix_data_dict[col_name].append((fid, mat_array))
-
-    def _handle_scalar_data(self, ds, col_name, row_dict_1d, shape_len):
-        """Case C：处理常规 1D 标量或字符串，直接填入当前行字典"""
-        val = ds[0] if shape_len > 0 else ds[()]
-        if isinstance(val, bytes):
-            val = val.decode('utf-8', 'ignore')
-        elif isinstance(val, np.ndarray):
-            val = str(val.tolist())
-
-        row_dict_1d[col_name] = val
-
-    def export_data(self, is_excel=False):
+    def export_batch_data(self, is_excel=False):
         selected_h5_paths = []
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():
@@ -208,129 +183,82 @@ class H5DataMatrixExtractor(QMainWindow):
             return
 
         ext = "xlsx" if is_excel else "csv"
-        file_filter = "Excel Files (*.xlsx)" if is_excel else "CSV Files (*.csv)"
-        # 用户选择保存的基础路径和文件名
-        user_choice_path, _ = QFileDialog.getSaveFileName(self, "选择保存位置及名称", "", file_filter)
-
-        if not user_choice_path:
+        output_base_dir = QFileDialog.getExistingDirectory(self, "选择批量导出的目标文件夹")
+        if not output_base_dir:
             return
 
-        # 路径解析
-        base_dir = os.path.dirname(user_choice_path)
-        chosen_prefix = os.path.splitext(os.path.basename(user_choice_path))[0]
-        h5_filename_no_ext = os.path.splitext(os.path.basename(self.h5_file.filename))[0]
+        chosen_prefix, ok = QInputDialog.getText(self, "命名前缀", "请输入导出文件的前缀名 (如 drv_data):",
+                                                 text="drv_data")
+        if not ok or not chosen_prefix.strip():
+            return
+        chosen_prefix = chosen_prefix.strip()
 
-        # 建立一级根目录: [H5文件名]_h5
-        root_export_dir = os.path.join(base_dir, f"{h5_filename_no_ext}_h5")
+        total_frames = 0
+        valid_files = []
+        for fp in self.h5_file_paths:
+            try:
+                with h5py.File(fp, 'r') as f:
+                    if 'frames' in f:
+                        keys = sorted(f['frames'].keys())
+                        total_frames += len(keys)
+                        valid_files.append((fp, keys))
+            except:
+                pass
 
-        # 建立二级子目录
-        common_data_dir = os.path.join(root_export_dir, f"{chosen_prefix}_common_data")
-        frame_info_dir = os.path.join(root_export_dir, f"{chosen_prefix}_frame_info")
-        image_save_dir = os.path.join(root_export_dir, f"{chosen_prefix}_images")
+        if total_frames == 0:
+            return
 
-        # 确保目录存在
-        os.makedirs(common_data_dir, exist_ok=True)
+        self.btn_export_csv.setEnabled(False)
+        self.btn_export_excel.setEnabled(False)
 
-        # 准备容器
-        frame_keys = sorted(self.frames_group.keys())
-        total_frames = len(frame_keys)
-        all_rows_1d = []
-        matrix_data_dict = {}
-        has_images = False
+        self.progress = QProgressDialog("正在后台提取数据...", "取消", 0, total_frames, self)
+        self.progress.setWindowTitle("导出任务")
+        self.progress.resize(300, 150)
+        self.progress.setWindowModality(Qt.WindowModal)
+        self.progress.setValue(0)
 
-        progress = QProgressDialog("正在提取数据...", "取消", 0, total_frames, self)
-        progress.setWindowModality(Qt.WindowModal)
+        max_workers = self.spin_thread.value()
 
-        try:
-            for i, fid in enumerate(frame_keys):
-                if progress.wasCanceled():
-                    break
+        self.worker = ExportWorker(
+            valid_files=valid_files,
+            selected_h5_paths=selected_h5_paths,
+            output_base_dir=output_base_dir,
+            chosen_prefix=chosen_prefix,
+            ext=ext,
+            is_excel=is_excel,
+            max_workers=max_workers
+        )
 
-                frame_node = self.frames_group[fid]
-                row_dict_1d = {'Frame_ID': fid}
+        self.worker.progress_updated.connect(self.progress.setValue)
+        self.worker.finished_successfully.connect(self.on_export_success)
+        self.worker.error_occurred.connect(self.on_export_error)
+        self.worker.export_cancelled.connect(self.on_export_cancel)
+        self.progress.canceled.connect(self.worker.cancel)
 
-                for path in selected_h5_paths:
-                    col_name = path.replace('/', '_')
-                    try:
-                        ds = frame_node[path]
-                        shape_len = len(ds.shape)
+        self.worker.start()
 
-                        if 'image' in col_name.lower() or shape_len >= 3:
-                            # 传递新的图像根目录
-                            has_images = self._handle_image_data(ds, fid, col_name, image_save_dir, has_images)
-                        elif shape_len == 2:
-                            self._handle_matrix_data(ds, fid, path, matrix_data_dict)
-                        else:
-                            self._handle_scalar_data(ds, col_name, row_dict_1d, shape_len)
-                    except Exception:
-                        row_dict_1d[col_name] = None
+    def on_export_success(self, count, output_dir):
+        self.btn_export_csv.setEnabled(True)
+        self.btn_export_excel.setEnabled(True)
+        self.progress.close()
+        QMessageBox.information(self, "批量导出完成", f"已成功处理 {count} 个文件。\n\n已输出至:\n{output_dir}")
 
-                if len(row_dict_1d) > 1:
-                    all_rows_1d.append(row_dict_1d)
-                progress.setValue(i + 1)
+    def on_export_error(self, error_msg):
+        self.btn_export_csv.setEnabled(True)
+        self.btn_export_excel.setEnabled(True)
+        self.progress.close()
+        QMessageBox.critical(self, "错误", f"批量导出崩溃:\n{error_msg}")
 
-            export_summary = []
-
-            # 写入 1D 主表到 common_data 文件夹
-            if all_rows_1d:
-                main_csv_path = os.path.join(common_data_dir, f"{chosen_prefix}.{ext}")
-                df_1d = pd.DataFrame(all_rows_1d)
-                if is_excel:
-                    df_1d.to_excel(main_csv_path, index=False)
-                else:
-                    df_1d.to_csv(main_csv_path, index=False)
-                export_summary.append(f"主表: {chosen_prefix}.{ext}")
-
-            # 写入矩阵数据到 frame_info 文件夹
-            if matrix_data_dict:
-                os.makedirs(frame_info_dir, exist_ok=True)
-                for h5_path, mat_list in matrix_data_dict.items():
-                    dataset_name = h5_path.split('/')[-1]
-                    mat_save_path = os.path.join(frame_info_dir, f"{dataset_name}.{ext}")
-
-                    giant_list = []
-                    max_cols = 0
-                    for fid, mat in mat_list:
-                        if mat.size > 0:
-                            max_cols = max(max_cols, mat.shape[1] if len(mat.shape) > 1 else mat.shape[0])
-
-                    header = ["Frame_ID"] + [str(idx) for idx in range(max_cols)]
-                    for fid, mat in mat_list:
-                        if mat.size > 0:
-                            if len(mat.shape) == 1:
-                                mat = mat.reshape(1, -1)
-                            for row in mat:
-                                row_list = row.tolist()
-                                padded_row = row_list + [None] * (max_cols - len(row_list))
-                                giant_list.append([fid] + padded_row)
-
-                    if giant_list:
-                        df_mat = pd.DataFrame(giant_list, columns=header)
-                        if is_excel:
-                            df_mat.to_excel(mat_save_path, index=False)
-                        else:
-                            df_mat.to_csv(mat_save_path, index=False)
-                        export_summary.append(f"矩阵: {dataset_name}.{ext}")
-
-            if has_images:
-                export_summary.append("图像序列已分类导出")
-
-            progress.setValue(total_frames)
-            summary_text = "\n".join(export_summary)
-            QMessageBox.information(self, "导出完成",
-                                    f"已在以下位置生成数据结构：\n{root_export_dir}\n\n详情：\n{summary_text}")
-
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败:\n{str(e)}")
-
-
-    def closeEvent(self, event):
-        if self.h5_file:
-            self.h5_file.close()
-        event.accept()
+    def on_export_cancel(self):
+        self.btn_export_csv.setEnabled(True)
+        self.btn_export_excel.setEnabled(True)
+        self.progress.close()
+        QMessageBox.warning(self, "已取消", "后台数据提取任务已被中止。")
 
 
 if __name__ == "__main__":
+    # 注：多进程在 Windows 下必须加这一句，防止子进程无限递归派生
+    multiprocessing.freeze_support()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = H5DataMatrixExtractor()
