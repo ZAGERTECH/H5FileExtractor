@@ -2,7 +2,7 @@ import multiprocessing
 import os
 import shutil
 from datetime import datetime
-
+import openpyxl
 from PyQt5.QtCore import  QThread, pyqtSignal
 import concurrent.futures
 import cv2

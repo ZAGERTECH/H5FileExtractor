@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QSpinBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPalette, QIcon
-
+import openpyxl
 from ExportWorker import ExportWorker
 
 
@@ -83,6 +83,10 @@ class H5DataMatrixExtractor(QMainWindow):
         about_text = (
             "<h2 align='center'>H5FileExtractor</h2>"
             "<table>"
+            "<tr>"
+            "<td><b>版本：</b></td>"
+            "<td>Ver.260429</td>"
+            "</tr>"
             "<tr>"
             "<td><b>作者：</b></td>"
             "<td>sbhinx</td>"
@@ -265,6 +269,11 @@ class H5DataMatrixExtractor(QMainWindow):
         self.progress.close()
         QMessageBox.warning(self, "已取消", "后台数据提取任务已被中止。")
 
+def resource_path(relative_path):
+    """ 获取资源的绝对路径，兼容开发环境和 PyInstaller 打包环境 """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
@@ -285,7 +294,7 @@ if __name__ == "__main__":
     app.setPalette(palette)
 
     # 设置全局应用程序图标（这会自动应用到主窗口以及所有弹出的子窗口/对话框）
-    app.setWindowIcon(QIcon("resource/logo.png"))
+    app.setWindowIcon(QIcon(resource_path("resource/logo.png")))
 
     window = H5DataMatrixExtractor()
     window.show()
