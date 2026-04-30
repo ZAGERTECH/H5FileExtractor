@@ -49,8 +49,11 @@ def process_frames_chunk(filepath, chunk_fids, selected_h5_paths, image_save_dir
                             target_dir = os.path.join(image_save_dir, sub_folder)
                             os.makedirs(target_dir, exist_ok=True)
                             img_filename = os.path.join(target_dir, f"{fid}_{col_name}.png")
-                            cv2.imwrite(img_filename, img_array)
-                            has_images = True
+                            # 先编码进内存，再用 numpy 写入磁盘，以修复 OpenCV 的中文路径 BUG
+                            is_success, im_buf = cv2.imencode(".png", img_array)
+                            if is_success:
+                                im_buf.tofile(img_filename)
+                                has_images = True
 
                     elif shape_len == 2:
                         mat_array = ds[:]
