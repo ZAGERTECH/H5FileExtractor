@@ -85,7 +85,7 @@ class H5DataMatrixExtractor(QMainWindow):
             "<table>"
             "<tr>"
             "<td><b>版本：</b></td>"
-            "<td>Ver.260429</td>"
+            "<td>Ver.260430</td>"
             "</tr>"
             "<tr>"
             "<td><b>作者：</b></td>"
