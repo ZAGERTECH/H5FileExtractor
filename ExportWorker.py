@@ -83,7 +83,7 @@ class ExportWorker(QThread):
     error_occurred = pyqtSignal(str)
     export_cancelled = pyqtSignal()
     status_updated = pyqtSignal(str)
-    disable_cancel_btn = pyqtSignal()
+    toggle_cancel_btn = pyqtSignal(bool)
 
     def __init__(self, valid_files, selected_h5_paths, output_base_dir, chosen_prefix, ext, is_excel, max_workers):
         super().__init__()
@@ -117,12 +117,14 @@ class ExportWorker(QThread):
 
         try:
             for fp, frame_keys in self.valid_files:
+                h5_filename_no_ext = os.path.splitext(os.path.basename(fp))[0]
+                root_export_dir = os.path.join(self.output_base_dir, f"{h5_filename_no_ext}_h5")
+
+                self.status_updated.emit(f"正在提取 {h5_filename_no_ext} ...")
+                self.toggle_cancel_btn.emit(True)
                 if self.is_cancelled:
                     write_log("WARNING: 任务已被用户手动取消")
                     break
-
-                h5_filename_no_ext = os.path.splitext(os.path.basename(fp))[0]
-                root_export_dir = os.path.join(self.output_base_dir, f"{h5_filename_no_ext}_h5")
 
                 write_log(f"开始解析: {os.path.basename(fp)} (包含 {len(frame_keys)} 帧)")
 
@@ -177,7 +179,7 @@ class ExportWorker(QThread):
 
                 # 发送状态信号，告诉 UI 现在进入了写文件阶段
                 self.status_updated.emit(f"正在保存 {h5_filename_no_ext} 的导出文件，请稍候...")
-                self.disable_cancel_btn.emit()
+                self.toggle_cancel_btn.emit(False)
 
                 all_rows_1d.sort(key=lambda x: x['Frame_ID'])
                 for path in matrix_data_dict:

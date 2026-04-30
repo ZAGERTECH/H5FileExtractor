@@ -242,7 +242,9 @@ class H5DataMatrixExtractor(QMainWindow):
         self.worker.progress_updated.connect(self.progress.setValue)
         # 绑定状态信号到进度条的标签文字上
         # 收到禁用信号后，直接把取消按钮设为 None (即隐藏)
-        self.worker.disable_cancel_btn.connect(lambda: self.progress.setCancelButton(None))
+        self.worker.toggle_cancel_btn.connect(
+            lambda state: [btn.setEnabled(state) for btn in self.progress.findChildren(QPushButton)]
+        )
         self.worker.status_updated.connect(self.progress.setLabelText)
         self.worker.finished_successfully.connect(self.on_export_success)
         self.worker.error_occurred.connect(self.on_export_error)
@@ -255,7 +257,7 @@ class H5DataMatrixExtractor(QMainWindow):
         self.btn_export_csv.setEnabled(True)
         self.btn_export_excel.setEnabled(True)
         self.progress.close()
-        QMessageBox.information(self, "批量导出完成", f"已成功处理 {count} 个文件。\n\n已输出至:\n{output_dir}")
+        QMessageBox.information(self, "批量导出完成", f"已成功处理 {count} 个文件。\n已输出至:\n{output_dir}")
 
     def on_export_error(self, error_msg):
         self.btn_export_csv.setEnabled(True)
